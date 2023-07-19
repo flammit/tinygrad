@@ -134,7 +134,7 @@ class Transformer:
     self.layers = [TransformerBlock(dim, multiple_of, n_heads, norm_eps, linear) for _ in range(n_layers)]
     self.norm = RMSNorm(dim, norm_eps)
     self.tok_embeddings = Embedding(vocab_size, dim)
-    self.output = AbsmaxQuantizedLinear(dim, vocab_size)
+    self.output = linear(dim, vocab_size)
     self.freqs_cis = Tensor(precompute_freqs_cis(dim // n_heads, max_seq_len * 2))
 
   def __call__(self, tokens:Tensor, start_pos:int):
