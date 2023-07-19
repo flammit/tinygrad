@@ -51,7 +51,7 @@ class RMSNorm:
     return (x * (x.pow(2).mean(-1, keepdim=True) + self.eps).rsqrt()) * self.weight
 
 class Attention:
-  def __init__(self, dim, n_heads, linear):
+  def __init__(self, dim, n_heads, linear=functools.partial(Linear, bias=False)):
     self.wq, self.wk, self.wv, self.wo = [linear(dim, dim) for _ in range(4)]
     self.n_heads = n_heads
     self.head_dim = dim // n_heads
@@ -92,7 +92,7 @@ class Attention:
     return self.wo(output)
 
 class FeedForward:
-  def __init__(self, dim, hidden_dim, multiple_of, linear):
+  def __init__(self, dim, hidden_dim, multiple_of, linear=functools.partial(Linear, bias=False)):
     # TODO: what is this?
     hidden_dim = int(2 * hidden_dim / 3)
     hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
@@ -104,7 +104,7 @@ class FeedForward:
     return self.w2(self.w1(x).silu() * self.w3(x))
 
 class TransformerBlock:
-  def __init__(self, dim, multiple_of, n_heads, norm_eps, linear):
+  def __init__(self, dim, multiple_of, n_heads, norm_eps, linear=functools.partial(Linear, bias=False)):
     self.attention = Attention(dim, n_heads, linear)
     self.feed_forward = FeedForward(dim, 4*dim, multiple_of, linear)
     self.attention_norm = RMSNorm(dim, norm_eps)
@@ -130,7 +130,7 @@ class TransformerBlock:
     return self._post(x, output)
 
 class Transformer:
-  def __init__(self, dim, multiple_of, n_heads, n_layers, norm_eps, vocab_size, linear, max_batch_size=32, max_seq_len=1024):
+  def __init__(self, dim, multiple_of, n_heads, n_layers, norm_eps, vocab_size, linear=functools.partial(Linear, bias=False), max_batch_size=32, max_seq_len=1024):
     self.layers = [TransformerBlock(dim, multiple_of, n_heads, norm_eps, linear) for _ in range(n_layers)]
     self.norm = RMSNorm(dim, norm_eps)
     self.tok_embeddings = Embedding(vocab_size, dim)
@@ -235,22 +235,21 @@ if __name__ == "__main__":
   chatbot = args.prompt == None
 
   from tinygrad.state import torch_load, load_state_dict
-  linear = AbsmaxQuantizedLinear if args.quantize else functools.partial(Linear, bias=False)
   if args.size == "65B":
     print("using 65B model")
-    model = Transformer(**args_65B, linear=linear)
+    model = Transformer(**args_65B, linear=AbsmaxQuantizedLinear) if args.quantize else Transformer(**args_65B)
     weights = concat_weights([torch_load(filename) for filename in WEIGHTS_65B_FILENAMES])
   elif args.size == "30B":
     print("using 30B model")
-    model = Transformer(**args_30B, linear=linear)
+    model = Transformer(**args_30B, linear=AbsmaxQuantizedLinear) if args.quantize else Transformer(**args_30B)
     weights = concat_weights([torch_load(filename) for filename in WEIGHTS_30B_FILENAMES])
   elif args.size == "13B":
     print("using 13B model")
-    model = Transformer(**args_13B, linear=linear)
+    model = Transformer(**args_13B, linear=AbsmaxQuantizedLinear) if args.quantize else Transformer(**args_13B)
     weights = concat_weights([torch_load(filename) for filename in WEIGHTS_13B_FILENAMES])
   else:
     print("using 7B model")
-    model = Transformer(**args_7B, linear=linear)
+    model = Transformer(**args_7B, linear=AbsmaxQuantizedLinear) if args.quantize else Transformer(**args_7B)
     weights = concat_weights([torch_load(WEIGHTS_7B_FILENAME)])
   if args.quantize:
     weights = AbsmaxQuantizedLinear.quantize(weights)
