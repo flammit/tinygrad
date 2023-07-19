@@ -51,8 +51,8 @@ class RMSNorm:
     return (x * (x.pow(2).mean(-1, keepdim=True) + self.eps).rsqrt()) * self.weight
 
 class Attention:
-  def __init__(self, dim, n_heads):
-    self.wq, self.wk, self.wv, self.wo = [Linear(dim, dim, bias=False) for _ in range(4)]
+  def __init__(self, dim, n_heads, linear):
+    self.wq, self.wk, self.wv, self.wo = [linear(dim, dim) for _ in range(4)]
     self.n_heads = n_heads
     self.head_dim = dim // n_heads
 
@@ -92,21 +92,21 @@ class Attention:
     return self.wo(output)
 
 class FeedForward:
-  def __init__(self, dim, hidden_dim, multiple_of):
+  def __init__(self, dim, hidden_dim, multiple_of, linear):
     # TODO: what is this?
     hidden_dim = int(2 * hidden_dim / 3)
     hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-    self.w1 = Linear(dim, hidden_dim, bias=False)
-    self.w2 = Linear(hidden_dim, dim, bias=False)
-    self.w3 = Linear(dim, hidden_dim, bias=False)
+    self.w1 = linear(dim, hidden_dim)
+    self.w2 = linear(hidden_dim, dim)
+    self.w3 = linear(dim, hidden_dim)
 
   def __call__(self, x:Tensor) -> Tensor:
     return self.w2(self.w1(x).silu() * self.w3(x))
 
 class TransformerBlock:
-  def __init__(self, dim, multiple_of, n_heads, norm_eps):
-    self.attention = Attention(dim, n_heads)
-    self.feed_forward = FeedForward(dim, 4*dim, multiple_of)
+  def __init__(self, dim, multiple_of, n_heads, norm_eps, linear):
+    self.attention = Attention(dim, n_heads, linear)
+    self.feed_forward = FeedForward(dim, 4*dim, multiple_of, linear)
     self.attention_norm = RMSNorm(dim, norm_eps)
     self.ffn_norm = RMSNorm(dim, norm_eps)
     if getenv("JIT"):
@@ -130,11 +130,11 @@ class TransformerBlock:
     return self._post(x, output)
 
 class Transformer:
-  def __init__(self, dim, multiple_of, n_heads, n_layers, norm_eps, vocab_size, max_batch_size=32, max_seq_len=1024):
-    self.layers = [TransformerBlock(dim, multiple_of, n_heads, norm_eps) for _ in range(n_layers)]
+  def __init__(self, dim, multiple_of, n_heads, n_layers, norm_eps, vocab_size, linear, max_batch_size=32, max_seq_len=1024):
+    self.layers = [TransformerBlock(dim, multiple_of, n_heads, norm_eps, linear) for _ in range(n_layers)]
     self.norm = RMSNorm(dim, norm_eps)
     self.tok_embeddings = Embedding(vocab_size, dim)
-    self.output = Linear(dim, vocab_size, bias=False)
+    self.output = AbsmaxQuantizedLinear(dim, vocab_size)
     self.freqs_cis = Tensor(precompute_freqs_cis(dim // n_heads, max_seq_len * 2))
 
   def __call__(self, tokens:Tensor, start_pos:int):
@@ -181,18 +181,33 @@ def sample(logits, temperature):
 def concat_weights(models):
   def convert(name) -> Tensor:
     disk_tensors = [model[name] for model in models]
-    if len(disk_tensors) == 1:
-      return disk_tensors[0]
-    if len(disk_tensors[0].shape) == 1:
-      return disk_tensors[0]
-    if name.startswith('tok_embeddings.') or name.endswith('.attention.wo.weight') or name.endswith('.feed_forward.w2.weight'):
-      axis = 1
-    else:
-      axis = 0
+    if len(disk_tensors) == 1 or len(disk_tensors[0].shape) == 1:
+      return disk_tensors[0].to(device=Device.DEFAULT)
+    axis = 1 if name.startswith('tok_embeddings.') or name.endswith('.attention.wo.weight') or name.endswith('.feed_forward.w2.weight') else 0
     lazy_tensors = [data.to(device=Device.DEFAULT) for data in disk_tensors]
-    first, rest = lazy_tensors[0], lazy_tensors[1:]
-    return first.cat(*rest, dim=axis)
+    return lazy_tensors[0].cat(*lazy_tensors[1:], dim=axis)
   return {name: convert(name) for name in {name: None for model in models for name in model}}
+
+class AbsmaxQuantizedLinear:
+  def __init__(self, in_features, out_features):
+    self.weight = Tensor.ones(out_features, in_features, dtype=dtypes.int8)
+    self.scale = Tensor.ones(out_features, dtype=dtypes.half)
+
+  def __call__(self, x):
+    return x.dot(self.weight.cast(dtype=dtypes.half).T*self.scale/127.)
+
+  @staticmethod
+  def quantize(tensors):
+    new_tensors = {}
+    for name,v in tensors.items():
+      if 'feed_forward' in name or ('attention.w') in name or name == 'output.weight':
+        xmax = v.abs().max(axis=1)
+        int8_weight = (v.T/xmax*127.).T.cast(dtype=dtypes.int8)
+        new_tensors[name] = int8_weight
+        new_tensors[name.replace('weight', 'scale')] = xmax
+      else:
+        new_tensors[name] = v
+    return new_tensors
 
 # **** main code ****
 
@@ -214,30 +229,32 @@ if __name__ == "__main__":
   parser.add_argument('--timing', action='store_true', help="Print timing per token")
   parser.add_argument('--profile', action='store_true', help="Output profile data to out.prof")
   parser.add_argument('--size', type=str, default="7B", help="Size of model to use [7B, 13B, 30B, 65B]")
+  parser.add_argument('--quantize', action='store_true', help="Quantize the weights to int8 in memory")
 
   args = parser.parse_args()
   chatbot = args.prompt == None
 
   from tinygrad.state import torch_load, load_state_dict
+  linear = AbsmaxQuantizedLinear if args.quantize else functools.partial(Linear, bias=False)
   if args.size == "65B":
     print("using 65B model")
-    model = Transformer(**args_65B)
-    weights = [torch_load(filename) for filename in WEIGHTS_65B_FILENAMES]
-    load_state_dict(model, concat_weights(weights), strict=False)
+    model = Transformer(**args_65B, linear=linear)
+    weights = concat_weights([torch_load(filename) for filename in WEIGHTS_65B_FILENAMES])
   elif args.size == "30B":
     print("using 30B model")
-    model = Transformer(**args_30B)
-    weights = [torch_load(filename) for filename in WEIGHTS_30B_FILENAMES]
-    load_state_dict(model, concat_weights(weights), strict=False)
+    model = Transformer(**args_30B, linear=linear)
+    weights = concat_weights([torch_load(filename) for filename in WEIGHTS_30B_FILENAMES])
   elif args.size == "13B":
     print("using 13B model")
-    model = Transformer(**args_13B)
-    weights = [torch_load(filename) for filename in WEIGHTS_13B_FILENAMES]
-    load_state_dict(model, concat_weights(weights), strict=False)
+    model = Transformer(**args_13B, linear=linear)
+    weights = concat_weights([torch_load(filename) for filename in WEIGHTS_13B_FILENAMES])
   else:
     print("using 7B model")
-    model = Transformer(**args_7B)
-    load_state_dict(model, torch_load(WEIGHTS_7B_FILENAME), strict=False)
+    model = Transformer(**args_7B, linear=linear)
+    weights = concat_weights([torch_load(WEIGHTS_7B_FILENAME)])
+  if args.quantize:
+    weights = AbsmaxQuantizedLinear.quantize(weights)
+  load_state_dict(model, weights, strict=False)
 
   # *** prompt engineers work here ****
 
