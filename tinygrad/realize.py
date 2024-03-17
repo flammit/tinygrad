@@ -46,10 +46,13 @@ logops = open(getenv("LOGOPS", ""), "a") if getenv("LOGOPS", "") else None
 def run_schedule(schedule:List[ScheduleItem]):
   while len(schedule):
     si = schedule.pop(0)
+    print(f"run_schedule START: {si=}")
     if logops and si.ast[0].op not in LoadOps and not any(i.device.startswith("DISK:") for i in si.inputs): logops.write(str(si.ast)+"\n")
 
     # get the program
+    print(f"run_schedule BEFORE LOWER")
     prg = lower_schedule_item(si)
+    print(f"run_schedule AFTER LOWER")
 
     for out in si.outputs:
       # we don't have an output buffer, we have to create it, and create to max size if it has symbolic shape
@@ -66,10 +69,14 @@ def run_schedule(schedule:List[ScheduleItem]):
     # run the function (put it in JIT)
     real_buffers = [x.realized for x in si.outputs+si.inputs if x.size != 0]
     assert all(x is not None for x in real_buffers), f"can't run, some inputs aren't realized {real_buffers}"
-    if prg: prg.exec(cast(List[Buffer], real_buffers), si.var_vals)
+    if prg:
+      print(f"run_schedule BEFORE EXEC")
+      prg.exec(cast(List[Buffer], real_buffers), si.var_vals)
+      print(f"run_schedule AFTER EXEC")
     elif (out:=si.outputs[0]).size > 0: update_stats(colored(f"empty {out.st.size:10d} {out.dtype}", "yellow"), 0, 0, {}, None, 1, device=out.device)
     if GRAPH:
       for out in si.outputs: realized_lazybuffer(out, GlobalCounters.kernel_count)
+    print(f"run_schedule END")
 
 # *** schedule creation ***
 
