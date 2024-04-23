@@ -15,7 +15,7 @@ actions += [Opt(op=OptOps.UNROLL, axis=axis, amt=amt) for amt in [0,4,7] for axi
 actions += [Opt(op=OptOps.LOCAL, axis=axis, amt=amt) for amt in [2,3,4,8,13,16,29] for axis in range(5)]
 actions += [Opt(op=OptOps.GROUPTOP, axis=axis, amt=amt) for amt in [13,16,28,29,32,49,64,256] for axis in range(3)]
 actions += [Opt(op=OptOps.GROUP, axis=axis, amt=amt) for amt in [0,4,8,16] for axis in range(3)]
-actions += [Opt(op=OptOps.PADTO, axis=axis, amt=amt) for amt in [32] for axis in range(7)]
+# actions += [Opt(op=OptOps.PADTO, axis=axis, amt=amt) for amt in [32] for axis in range(7)]
 actions += [Opt(op=OptOps.LOCAL, axis=0, amt=32), Opt(op=OptOps.UPCASTMID, axis=1, amt=4), Opt(op=OptOps.TC, axis=0, amt=0)]
 actions += [Opt(op=OptOps.TC, axis=axis, amt=getenv("TC_OPT", 2)) for axis in range(4)]
 if getenv("NOLOCALS"): actions += [Opt(op=OptOps.NOLOCALS)]
@@ -89,13 +89,19 @@ def _count_upcast_local(lin:Linearizer):
     elif c in {"cyan", "green", "white"}: lcl *= s
   return up//tc_up, lcl
 
-def get_linearizer_actions(lin:Linearizer, include_0=True) -> Dict[int, Linearizer]:
+_THREAD_OPS = [OptOps.TC, OptOps.LOCAL, OptOps.GROUP, OptOps.GROUPTOP]
+_MEM_OPS = [OptOps.UNROLL, OptOps.UPCAST]
+
+def get_linearizer_actions(lin:Linearizer, include_0=True, bias:Optional[int]=None) -> Dict[int, Linearizer]:
   acted_lins, max_up, max_lcl = {0:lin} if include_0 else {}, getenv("BEAM_UPCAST_MAX", 256), getenv("BEAM_LOCAL_MAX", 256)
   _, start_lcl = _count_upcast_local(lin)
+  last_op = lin.applied_opts[-1].op if lin.applied_opts else None
   for i,a in enumerate(actions):
     if a.axis is not None and a.axis >= lin.shape_len: continue
     if a.axis is not None and lin.full_shape[a.axis] == a.amt and Opt(a.op, a.axis, 0) in actions: continue
-    if start_lcl == 1 and a.op in [OptOps.UPCAST, OptOps.UNROLL]: continue
+    if start_lcl == 1 and a.op in [OptOps.UPCAST, OptOps.UNROLL, OptOps.PADTO]: continue
+    if bias is not None and bias % 2 == 1 and a.op in _MEM_OPS: continue
+    elif bias is not None and bias % 2 == 0 and a.op in _THREAD_OPS: continue
     lin2 = lin.copy()
     try:
       lin2.apply_opt(a)
@@ -124,10 +130,10 @@ def beam_search(lin:Linearizer, rawbufs:List[Buffer], amt:int, allow_test_size=T
   try:
     rawbufs = _ensure_buffer_alloc(rawbufs)
     var_vals = {k:(k.max+k.min)//2 for k in lin.ast[0].vars()}
-    exiting, st = False, time.perf_counter()
+    exiting, st, bias, benchmark_time = False, time.perf_counter(), 0, 0
     dev = Device[lin.opts.device]
     while not exiting:
-      acted_lins: List[Linearizer] = flatten([get_linearizer_actions(lin, include_0=False).values() for lin,_ in beam]) if len(beam) else [lin]
+      acted_lins: List[Linearizer] = flatten([get_linearizer_actions(lin, False, bias).values() for lin,_ in beam]) if len(beam) else [lin]
       timed_lins: List[Tuple[Linearizer, float]] = []
       _compile_fn = functools.partial(_try_compile_linearized_w_idx, compiler=dev.compiler)
       for i,proc in (map(_compile_fn, enumerate(acted_lins)) if beam_pool is None else beam_pool.imap_unordered(_compile_fn, enumerate(acted_lins))):
@@ -143,12 +149,14 @@ def beam_search(lin:Linearizer, rawbufs:List[Buffer], amt:int, allow_test_size=T
         elif DEBUG >= 2: print(f"\r{time.perf_counter() - st:7.2f}s: {timed_lins[-1][1]*1e6:12.2f} us       {len(timed_lins):4d}/{len(acted_lins):4d}         {timed_lins[-1][0].colored_shape()}\033[K", end="")  # noqa: E501
 
       # done
-      opts = sorted(timed_lins, key=lambda x: x[1])
-      exiting = len(opts) == 0 or (len(beam) > 0 and ((beam[0][1]-opts[0][1])*1e6 < min_progress_micros))
-      if not exiting: beam = opts[:amt]
-      elif len(opts) > 0 and opts[0][1] < beam[0][1]: beam = opts[:1]
+      opts = sorted(timed_lins+ beam, key=lambda x: x[1])
+      # if len(beam) == 0 or len(beam[0][0].applied_opts) == len(opts[0][0].applied_opts): bias += 1
+      bias += 1
+      exiting = len(timed_lins) == 0 or (bias > 1 and bias%2 == 1 and ((benchmark_time-opts[0][1])*1e6 < min_progress_micros))
+      beam = sorted(opts+beam, key=lambda x: x[1])[:amt]
+      if bias % 2 == 1: benchmark_time = beam[0][1]
       assert len(beam) > 0, "no BEAM items succeeded?!?" # this asserts in unet3d multi-gpu, need to figure out why
-      if DEBUG >= 2: print(f"\r{time.perf_counter() - st:7.2f}s:", colored(f"{beam[0][1]*1e6:12.2f} us", "green" if exiting else None), f"from {len(acted_lins):3d} -> {len(opts):3d} actions\033[K", beam[0][0].colored_shape())  # noqa: E501
+      if DEBUG >= 2: print(f"\r{time.perf_counter() - st:7.2f}s: #{bias:2d} ", colored(f"{beam[0][1]*1e6:12.2f} us", "green" if exiting else None), f"from {len(acted_lins):3d} -> {len(opts):3d} actions\033[K", beam[0][0].colored_shape())  # noqa: E501
   except KeyboardInterrupt as e:
     if beam_pool is not None: beam_pool.terminate()
     raise e
