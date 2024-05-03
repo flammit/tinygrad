@@ -336,6 +336,7 @@ class Kernel:
   # ******************** high level optimizers ********************
 
   def _apply_tc_opt(self, use_tensor_cores:int, axis:int, opt_level:int) -> bool:
+    TC_DEBUG = getenv("TC_DEBUG")
     if use_tensor_cores and self.opts.has_local and self.reduceop and self.reduceop.op is ReduceOps.SUM and self.opts.device in tensor_cores:
       for tc in tensor_cores[self.opts.device]:
         has_cast = tc.dtype_in != tc.dtype_out
@@ -344,6 +345,7 @@ class Kernel:
         mul_op = self.reduceop.src[0].src[0] if has_cast else self.reduceop.src[0]
         if mul_op.op is not BinaryOps.MUL: continue
 
+        if TC_DEBUG and axis == 0 and opt_level == 2: print("TC_DEBUG 0: check bufs")
         def buf_index(src: LazyOp) -> Optional[int]:
           # TODO: apply tc even if the sources are not from LOAD
           if src.op is BufferOps.LOAD and src.arg.dtype == tc.dtype_in: return self.bufs.index(cast(MemBuffer, src.arg))
@@ -353,6 +355,7 @@ class Kernel:
           return None
         if (buf0:=buf_index(mul_op.src[0])) is None or (buf1:=buf_index(mul_op.src[1])) is None: continue
 
+        if TC_DEBUG and axis == 0 and opt_level == 2: print("TC_DEBUG 1: check strides")
         buf0_strides, buf1_strides = self.sts[buf0].real_strides(), self.sts[buf1].real_strides()
         axis_buf0 = [(i,self.full_shape[i],buf1_strides[i]) for i,s in enumerate(buf0_strides[:self.first_reduce]) if s == 0]
         axis_buf1 = [(i,self.full_shape[i],buf0_strides[i]) for i,s in enumerate(buf1_strides[:self.first_reduce]) if s == 0]
@@ -370,7 +373,7 @@ class Kernel:
 
         # attempt to pad the tensor axes that require it
         try:
-          for axis, dim in axis_pads: self.apply_opt(Opt(OptOps.PADTO, axis, dim), append_opt=False) # PADTO might fail
+          for ax, sz in axis_pads: self.apply_opt(Opt(OptOps.PADTO, ax, sz), append_opt=False) # PADTO might fail
         except KernelOptError: continue
         self.apply_opt(Opt(OptOps.UNROLL, s2-self.first_reduce, tc.dims[2]), append_opt=False)
         for i, sz in enumerate([prod(x) for x in [[x[1] for x in tc.threads if x[0]==dim] for dim in range(2)]]): # upcast non-local'd N, M
@@ -379,7 +382,7 @@ class Kernel:
           self.apply_opt(Opt(OptOps.LOCAL, tc_opts.axes[tc_dim], tc_amt), append_opt=False)
 
         # assert tensor core
-        if DEBUG >= 3: print("TENSOR CORES", axis_buf0, axis_buf1, tc)
+        if DEBUG >= 3 or TC_DEBUG: print(f"TENSOR CORES: {axis=} {s0=} {s1=} {s2=} {axis_buf0=} {axis_buf1=} {tc}")
         if use_tensor_cores == 1: self.tensor_core = tc # TC=2 will do the shape ops without the WMMA
         return True
     return False
