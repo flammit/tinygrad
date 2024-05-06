@@ -13,7 +13,7 @@ from enum import Enum, auto
 
 class OptOps(Enum):
   TC = auto(); UPCAST = auto(); UPCASTMID = auto(); UNROLL = auto(); LOCAL = auto() # noqa: E702
-  GROUP = auto(); GROUPTOP = auto(); NOLOCALS = auto(); PADTO = auto() # noqa: E702
+  GROUP = auto(); GROUPTOP = auto(); NOLOCALS = auto(); PADTO = auto(); PERMUTE = auto() # noqa: E702
   def __lt__(self, x:OptOps): return self.value < x.value
 
 class KernelOptError(Exception): pass
@@ -364,10 +364,12 @@ class Kernel:
         axis_buf1 = [(i,self.full_shape[i],buf0_strides[i]) for i,s in enumerate(buf1_strides[:self.first_reduce]) if s == 0]
         if not(axis_buf0 and axis_buf1 and ((self.shape_len-self.first_reduce) == 1 or (opt_level >= 1))): continue
 
-        axis_choices = list(itertools.product(axis_buf0, axis_buf1, range(self.first_reduce, self.shape_len)))
+        reduce_axes = list(range(self.first_reduce, self.shape_len))
+        reduce_perms = list(range(prod(range(1,len(reduce_axes)+1))))
+        axis_choices = list(itertools.product(axis_buf0, axis_buf1, reduce_axes, reduce_perms))
         if not(axis < len(axis_choices)): continue
 
-        s0, s1, s2 = axis_choices[-(axis+1)][0][0], axis_choices[-(axis+1)][1][0], axis_choices[-(axis+1)][2]  # s0 is n, s1 is m, s2 is k
+        s0, s1, s2, s3 = axis_choices[-(axis+1)][0][0], axis_choices[-(axis+1)][1][0], axis_choices[-(axis+1)][2], axis_choices[-(axis+1)][3]  # s0 is n, s1 is m, s2 is k
         axis_pads = [(x, tc.dims[i]) for i, x in enumerate([s0, s1, s2]) if self.full_shape[x]%tc.dims[i] != 0]
         if axis_pads and (opt_level < 2): continue
 
@@ -383,9 +385,10 @@ class Kernel:
           if tc.dims[i] > sz: self.apply_opt(Opt(OptOps.UPCAST, tc_opts.axes[i], tc.dims[i]//sz), append_opt=False)
         for (tc_dim, tc_amt) in tc.threads:
           self.apply_opt(Opt(OptOps.LOCAL, tc_opts.axes[tc_dim], tc_amt), append_opt=False)
+        if s3 > 0: self.apply_opt(Opt(OptOps.PERMUTE, amt=s3), append_opt=False)
 
         # assert tensor core
-        if DEBUG >= 3: print("TENSOR CORES", axis_buf0, axis_buf1, tc)
+        if DEBUG >= 3: print(f"TENSOR CORES: {axis=} [{s0=} {s1=} {s2=} {s3=}] {axis_buf0} {axis_buf1} {tc}")
         if use_tensor_cores == 1: self.tensor_core = tc # TC=2 will do the shape ops without the WMMA
         return True
     return False
@@ -446,7 +449,7 @@ class Kernel:
     axis = opt.real_axis(self)
     check(axis < len(self.full_shape), "invalid axis")
 
-    if opt.amt is not None:
+    if opt.amt is not None and opt.op is not OptOps.PERMUTE:
       amt = opt.amt if opt.amt != 0 else self.full_shape[axis]
       check(isinstance(amt, int) and amt != 1, "shift/padto of amt 1 or Node is meaningless")
       if opt.op is not OptOps.PADTO: check(self.full_shape[axis] % amt == 0, "no longer valid shift")
@@ -512,6 +515,12 @@ class Kernel:
           self.sts[i] = st.pad(((0,0),) * axis + ((0,ru),) + ((0,0),) * (len(st.shape)-axis-1))
           padded = True
       check(padded, "nothing was padded")
+    elif opt.op is OptOps.PERMUTE:
+      reduce_perms = list(itertools.permutations(range(self.first_reduce, self.shape_len-self.upcasted)))
+      check(amt < len(reduce_perms), "invalid permutation")
+      new_indices = list(range(self.first_reduce)) + list(reduce_perms[amt]) + list(range(self.shape_len-self.upcasted, self.shape_len))
+      for i,st in enumerate(self.sts):
+        self.sts[i] = st.permute(tuple(new_indices))
 
     if append_opt: self.applied_opts.append(opt)
     if self.simplify_ones() and self.tensor_core_opts:
