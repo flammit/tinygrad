@@ -16,6 +16,7 @@ def get_linearizer(renderer:Renderer, ast:Tuple[LazyOp, ...]) -> Linearizer:
   if DEBUG >= 3:
     from tinygrad.engine.graph import print_tree
     for op in ast: print_tree(op)
+  if (BEAM_DEBUG:=getenv("BEAM_DEBUG")) >= 1: print(ast)
   k = Linearizer(*ast, opts=renderer)
   k.required_optimizations()
   if not NOOPT:
@@ -38,7 +39,7 @@ def get_linearizer(renderer:Renderer, ast:Tuple[LazyOp, ...]) -> Linearizer:
         if logkerns is not None and logkerns_level > 1: logkerns.writelines([f"{(lin.ast, lin.applied_opts)}\n" for (_,lin,_) in timed[1:]])
   # TODO: check the correctness inline once compare_linearizer is in core
   if logkerns is not None: logkerns.writelines([f"{(k.ast, k.applied_opts)}\n"])
-  if DEBUG >= 4: print((k.ast, k.applied_opts)) # print here to show final applied_opts for all kernels instead of just in beam_search
+  if DEBUG >= 4 or BEAM_DEBUG >= 1: print((k.ast, k.applied_opts)) # print here to show final applied_opts
   return k
 
 # **************** Runners ****************

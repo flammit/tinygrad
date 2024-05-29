@@ -442,7 +442,8 @@ class Kernel:
     if opt.amt is not None:
       amt = opt.amt if opt.amt != 0 else self.full_shape[axis]
       check(isinstance(amt, int) and amt != 1, "shift/padto of amt 1 or Node is meaningless")
-      if opt.op is not OptOps.PADTO: check(self.full_shape[axis] % amt == 0, "no longer valid shift")
+      if opt.op not in [OptOps.PADTO, OptOps.PAD_GROUP, OptOps.PAD_UNROLL, OptOps.PAD_UPCAST, OptOps.PAD_LOCAL]:
+        check(self.full_shape[axis] % amt == 0, "no longer valid shift")
     else: amt = -1
 
     if self.reduceop and (opt.op in {OptOps.GROUP, OptOps.GROUPTOP} or (self.group_for_reduces and opt.op not in {OptOps.NOLOCALS, OptOps.PADTO})):
