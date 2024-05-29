@@ -16,6 +16,7 @@ from enum import Enum, auto
 class OptOps(Enum):
   TC = auto(); UPCAST = auto(); UPCASTMID = auto(); UNROLL = auto(); LOCAL = auto() # noqa: E702
   GROUP = auto(); GROUPTOP = auto(); NOLOCALS = auto(); PADTO = auto() # noqa: E702
+  PAD_GROUP = auto(); PAD_UNROLL = auto(); PAD_UPCAST = auto(); PAD_LOCAL = auto() # noqa: E702
   def __lt__(self, x:OptOps): return self.value < x.value
 
 class KernelOptError(Exception): pass
@@ -506,6 +507,18 @@ class Kernel:
           self.sts[i] = st.pad(((0,0),) * axis + ((0,ru),) + ((0,0),) * (len(st.shape)-axis-1))
           padded = True
       check(padded, "nothing was padded")
+    elif opt.op is OptOps.PAD_UNROLL:
+      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      self.apply_opt(Opt(OptOps.UNROLL, axis, amt), append_opt=False)
+    elif opt.op is OptOps.PAD_GROUP:
+      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      self.apply_opt(Opt(OptOps.GROUP, axis, amt), append_opt=False)
+    elif opt.op is OptOps.PAD_UPCAST:
+      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      self.apply_opt(Opt(OptOps.UPCAST, axis, amt), append_opt=False)
+    elif opt.op is OptOps.PAD_LOCAL:
+      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      self.apply_opt(Opt(OptOps.LOCAL, axis, amt), append_opt=False)
 
     if append_opt: self.applied_opts.append(opt)
     if self.simplify_ones() and self.tensor_core_opts:
