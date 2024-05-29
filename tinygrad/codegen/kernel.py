@@ -508,10 +508,10 @@ class Kernel:
           padded = True
       check(padded, "nothing was padded")
     elif opt.op is OptOps.PAD_UNROLL:
-      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 32), append_opt=False)
       self.apply_opt(Opt(OptOps.UNROLL, axis, amt), append_opt=False)
     elif opt.op is OptOps.PAD_GROUP:
-      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 32), append_opt=False)
       self.apply_opt(Opt(OptOps.GROUP, axis, amt), append_opt=False)
     elif opt.op is OptOps.PAD_UPCAST:
       self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
