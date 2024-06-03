@@ -14,15 +14,16 @@ from tinygrad.shape.symbolic import sym_infer
 from tinygrad.engine.realize import CompiledRunner
 from tinygrad.renderer import Program
 
-actions = [Opt(op=OptOps.UPCAST, axis=axis, amt=amt) for amt in [0,2,3,4,5,7] for axis in range(6)]
-actions += [Opt(op=OptOps.UNROLL, axis=axis, amt=amt) for amt in [0,4,7] for axis in range(5)]
+actions = [Opt(op=OptOps.UPCAST, axis=axis, amt=amt) for amt in [0,2,3,5,7] for axis in range(6)]
+actions += [Opt(op=OptOps.UNROLL, axis=axis, amt=amt) for amt in [0,7] for axis in range(5)]
 actions += [Opt(op=OptOps.LOCAL, axis=axis, amt=amt) for amt in [2,3,4,8,13,16,29] for axis in range(5)]
-actions += [Opt(op=OptOps.GROUPTOP, axis=axis, amt=amt) for amt in [13,16,28,29,32,49,64,256] for axis in range(3)]
-actions += [Opt(op=OptOps.GROUP, axis=axis, amt=amt) for amt in [0,4,8,16] for axis in range(3)]
+actions += [Opt(op=OptOps.GROUPTOP, axis=axis, amt=amt) for amt in [13,16,28,29,49,64,256] for axis in range(3)]
+actions += [Opt(op=OptOps.GROUP, axis=axis, amt=amt) for amt in [0,4,8] for axis in range(3)]
 # if getenv("BEAM_PADTO", 1): actions += [Opt(op=OptOps.PADTO, axis=axis, amt=amt) for amt in [32] for axis in range(7)]
-actions += [Opt(op=OptOps.LOCAL, axis=0, amt=32), Opt(op=OptOps.UPCASTMID, axis=1, amt=4), Opt(op=OptOps.TC, axis=0, amt=0)]
+# actions += [Opt(op=OptOps.UPCASTMID, axis=1, amt=4), Opt(op=OptOps.TC, axis=0, amt=0)] # here to cover the get_action_space
 actions += [Opt(op=OptOps.TC, axis=axis, amt=getenv("TC_OPT", 2)) for axis in range(9)] # covers resnet kernels (3 global * 3 reduce)
-actions += [Opt(op=OptOps.PAD_GROUP, axis=axis, amt=32) for axis in range(3)]
+actions += [Opt(op=OptOps.PAD_GROUPTOP, axis=axis, amt=32) for axis in range(3)]
+actions += [Opt(op=OptOps.PAD_GROUP, axis=axis, amt=16) for axis in range(3)]
 actions += [Opt(op=OptOps.PAD_UNROLL, axis=axis, amt=4) for axis in range(3)]
 actions += [Opt(op=OptOps.PAD_LOCAL, axis=axis, amt=32) for axis in range(5)]
 actions += [Opt(op=OptOps.PAD_UPCAST, axis=axis, amt=4) for axis in range(5)]

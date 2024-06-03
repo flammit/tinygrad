@@ -16,7 +16,7 @@ from enum import Enum, auto
 class OptOps(Enum):
   TC = auto(); UPCAST = auto(); UPCASTMID = auto(); UNROLL = auto(); LOCAL = auto() # noqa: E702
   GROUP = auto(); GROUPTOP = auto(); NOLOCALS = auto(); PADTO = auto() # noqa: E702
-  PAD_GROUP = auto(); PAD_UNROLL = auto(); PAD_UPCAST = auto(); PAD_LOCAL = auto() # noqa: E702
+  PAD_GROUP = auto(); PAD_GROUPTOP = auto(); PAD_UNROLL = auto(); PAD_UPCAST = auto(); PAD_LOCAL = auto() # noqa: E702
   def __lt__(self, x:OptOps): return self.value < x.value
 
 class KernelOptError(Exception): pass
@@ -426,7 +426,7 @@ class Kernel:
       return False
 
   def apply_opt(self, opt:Opt, append_opt:bool=True):
-    check(not self.dont_use_locals or opt.op not in {OptOps.LOCAL, OptOps.GROUP, OptOps.GROUPTOP, OptOps.UPCASTMID}, "not using locals")
+    check(not self.dont_use_locals or opt.op not in {OptOps.LOCAL, OptOps.GROUP, OptOps.GROUPTOP, OptOps.UPCASTMID, OptOps.PAD_GROUP, OptOps.PAD_GROUPTOP}, "not using locals")
 
     if opt.op is OptOps.TC:
       check(len(self.applied_opts) == 0, "tensor core opts must be first") # TODO: things like PADTO might be fine
@@ -442,7 +442,7 @@ class Kernel:
     if opt.amt is not None:
       amt = opt.amt if opt.amt != 0 else self.full_shape[axis]
       check(isinstance(amt, int) and amt != 1, "shift/padto of amt 1 or Node is meaningless")
-      if opt.op not in [OptOps.PADTO, OptOps.PAD_GROUP, OptOps.PAD_UNROLL, OptOps.PAD_UPCAST, OptOps.PAD_LOCAL]:
+      if opt.op not in [OptOps.PADTO, OptOps.PAD_GROUP, OptOps.PAD_GROUPTOP, OptOps.PAD_UNROLL, OptOps.PAD_UPCAST, OptOps.PAD_LOCAL]:
         check(self.full_shape[axis] % amt == 0, "no longer valid shift")
     else: amt = -1
 
@@ -509,16 +509,19 @@ class Kernel:
           padded = True
       check(padded, "nothing was padded")
     elif opt.op is OptOps.PAD_UNROLL:
-      self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 32), append_opt=False)
+      if self.full_shape[axis] % 32 != 0: self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 32), append_opt=False)
       self.apply_opt(Opt(OptOps.UNROLL, axis, amt), append_opt=False)
     elif opt.op is OptOps.PAD_GROUP:
-      self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 32), append_opt=False)
+      if self.full_shape[axis] % 256 == 0: self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 256), append_opt=False)
       self.apply_opt(Opt(OptOps.GROUP, axis, amt), append_opt=False)
+    elif opt.op is OptOps.PAD_GROUPTOP:
+      if self.full_shape[axis] % 256 == 0: self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 256), append_opt=False)
+      self.apply_opt(Opt(OptOps.GROUPTOP, axis, amt), append_opt=False)
     elif opt.op is OptOps.PAD_UPCAST:
-      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      if self.full_shape[axis] % 32 != 0: self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 32), append_opt=False)
       self.apply_opt(Opt(OptOps.UPCAST, axis, amt), append_opt=False)
     elif opt.op is OptOps.PAD_LOCAL:
-      self.apply_opt(Opt(OptOps.PADTO, axis, 32), append_opt=False)
+      if self.full_shape[axis] % 256 == 0: self.apply_opt(Opt(OptOps.PADTO, self.first_reduce + axis, 256), append_opt=False)
       self.apply_opt(Opt(OptOps.LOCAL, axis, amt), append_opt=False)
 
     if append_opt: self.applied_opts.append(opt)
