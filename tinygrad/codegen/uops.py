@@ -9,6 +9,9 @@ from tinygrad.shape.symbolic import sint, Variable
 from tinygrad.ops import UnaryOps, BinaryOps, TernaryOps, exec_alu
 from tinygrad.helpers import prod, DEBUG, getenv
 
+_idx_dt:DType = dtypes.int64 if getenv("IDX_INT64") else dtypes.int32
+_idx_dt_min:int = -(2 ** (63 if getenv("IDX_INT64") else 31))
+
 # the order of these UOps controls the order of the toposort
 class UOps(Enum):
   # ops that aren't rendered
@@ -171,7 +174,7 @@ constant_folder = PatternMatcher([
     UPat(UOps.ALU, BinaryOps.ADD, src=[UPat(name="idx"), UPat(UOps.ALU, UnaryOps.NEG, src=[
       UPat(UOps.RANGE, name="rng", src=(UPat(name="loop_start"), UPat(name="loop_end")))])]),
       UPat(UOps.CONST, name="compval"))), UPat(UOps.CONST, name="multconst"), UPat(UOps.CONST, 0))),
-      lambda **kwargs: loop_collapse(mval=UOp.const(dtypes.int, -1), **kwargs)),
+      lambda **kwargs: loop_collapse(mval=UOp.const(_idx_dt, -1), **kwargs)),
   # sum collapse to mul (with possible GEP)
   (UPat(UOps.PHI, src=(UPat(UOps.DEFINE_ACC, name="phi_input", src=[UPat(UOps.CONST), UPat(UOps.RANGE, name="loop")]),
                        UPat(UOps.ALU, BinaryOps.ADD, src=(UPat(name="val1"), UPat(name="val2"))))), sum_collapse),
@@ -195,7 +198,7 @@ constant_folder = PatternMatcher([
   (UPat(UOps.DEFINE_ACC, name="root", src=(UPat(UOps.CONST),)), lambda root: UOp.cast(root.src[0], root.dtype)),
   (UPat(UOps.GEP, name="root", src=(UPat(UOps.CONST, name="x"),)), lambda root,x: UOp.const(root.dtype, x.arg)),
   # max -2147483648
-  (UOp.max(UOp.var('x'), UOp.const(dtypes.int, -2147483648)), lambda x: x),
+  (UOp.max(UOp.var('x'), UOp.const(_idx_dt, _idx_dt_min)), lambda x: x),
   # bool < False is always false, True < bool is always false
   (UOp.var().lt(UOp.const(dtypes.bool, False)), lambda: UOp.const(dtypes.bool, False)),
   (UOp.const(dtypes.bool, True).lt(UOp.var()), lambda: UOp.const(dtypes.bool, False)),
@@ -261,7 +264,7 @@ constant_folder = PatternMatcher([
   (UPat(UOps.CAST, name="root", src=tuple(UPat(UOps.PHI, src=(UPat(UOps.GEP, i, src=(UPat(name="val"),)), UPat(name=f"v{i}"))) for i in range(2))),
     lambda root, val, v0, v1: UOp(UOps.PHI, root.dtype, (val, UOp(UOps.CAST, val.dtype, (v0, v1))))),
   # NEG/CMPLT -> CMPLT
-  (UOp.lt(-UOp.var('x'), UOp.cvar('c', dtypes.int)), lambda c,x: UOp.lt(UOp.const(c.dtype, -c.arg), x)),
+  (UOp.lt(-UOp.var('x'), UOp.cvar('c', _idx_dt)), lambda c,x: UOp.lt(UOp.const(c.dtype, -c.arg), x)),
   # cast NOOP (NOTE: it's str to deal with PtrDType)
   (UPat(UOps.CAST, name="root"), lambda root: root.src[0] if str(root.dtype) == str(root.src[0].dtype) else None),
   # fold gated LOAD/STORE
@@ -450,8 +453,8 @@ class UOpGraph:
           assert src[0].dtype == src[1].dtype, f"{arg} dtype mismatch {dtype=} != {src[0].dtype=} != {src[1].dtype=}"
         elif arg is BinaryOps.IDIV:
           assert dtypes.is_int(src[0].dtype) and dtypes.is_int(src[1].dtype), \
-              f"input dtype mismatch {dtypes.int} != {src[0].dtype=} != {src[1].dtype=}"
-          assert dtypes.is_int(dtype), f"{arg} output dtype mismatch {dtype=} != {dtypes.int}"
+              f"input dtype mismatch {_idx_dt} != {src[0].dtype=} != {src[1].dtype=}"
+          assert dtypes.is_int(dtype), f"{arg} output dtype mismatch {dtype=} != {_idx_dt}"
         elif arg in {BinaryOps.SHL, BinaryOps.SHR}:
           # the distance to shift isn't typechecked
           assert dtype == src[0].dtype, f"{arg} dtype mismatch {dtype=} != {src[0].dtype=}"

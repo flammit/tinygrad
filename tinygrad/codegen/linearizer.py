@@ -11,7 +11,7 @@ from tinygrad.shape.symbolic import Variable, NumNode, Node, SumNode, MulNode, D
 from tinygrad.codegen.kernel import LocalBuffer, Kernel
 from tinygrad.renderer import Program
 
-from tinygrad.codegen.uops import UOps, UOp, UOpGraph
+from tinygrad.codegen.uops import UOps, UOp, UOpGraph, _idx_dt
 
 def get_grouped_dims(prefix:str, off:int, dims:Tuple[sint, ...], max_sizes:Optional[Tuple[int, ...]], reverse_dims:bool=False):
   """ Maps all global/local dims onto global/local sizes and returns the idxs, loop_idxs and sizes.
@@ -93,12 +93,12 @@ def expand_node(node:Node, idxs:Optional[Tuple[Union[Variable, NumNode], ...]]=N
   return [node.substitute({k:v for k,v in zip(idxs, (NumNode(x) for x in rep)) if isinstance(k, Variable)}) for rep in iter_idxs(idxs)]
 
 def variable_to_uop(x, ctx=None) -> UOp:
-  if isinstance(x, int): return UOp.const(dtypes.int, x)
+  if isinstance(x, int): return UOp.const(_idx_dt, x)
   return x.render(render_ops, ctx)
 
 render_ops: Dict[Type, Callable[..., UOp]]  = {
-  NumNode: lambda self, ops, ctx: UOp.const(dtypes.int, self.b),
-  Variable: lambda self, ops, ctx: ctx[self.expr] if self.expr in ctx else UOp(UOps.DEFINE_VAR, dtypes.int, (), self),
+  NumNode: lambda self, ops, ctx: UOp.const(_idx_dt, self.b),
+  Variable: lambda self, ops, ctx: ctx[self.expr] if self.expr in ctx else UOp(UOps.DEFINE_VAR, _idx_dt, (), self),
   MulNode: lambda self, ops, ctx: self.a.render(ops, ctx)*variable_to_uop(self.b, ctx),
   DivNode: lambda self, ops, ctx: self.a.render(ops, ctx)//variable_to_uop(self.b, ctx),
   ModNode: lambda self, ops, ctx: self.a.render(ops, ctx)%variable_to_uop(self.b, ctx),
@@ -156,7 +156,7 @@ class Linearizer(Kernel):
           buf_uop = self.buf_uops[i]
           assert buf_uop is not None, f"buffer {i} wasn't UOped"
           image_idx, valid = to_image_idx(buf.dtype.shape, idx, valid)
-          rendered_idx = UOp(UOps.CAST, dtypes.int.vec(2), tuple(x.render(render_ops, self.loop_uops) for x in image_idx))
+          rendered_idx = UOp(UOps.CAST, _idx_dt.vec(2), tuple(x.render(render_ops, self.loop_uops) for x in image_idx))
           valid_tuple = (valid.render(render_ops, self.loop_uops), UOp.const(buf.dtype.base.vec(4), invalid_value)) if valid.min == 0 else tuple()
           self.load_cache[key] = UOp(UOps.LOAD, buf.dtype.base.vec(4),
                                                (buf_uop, rendered_idx) + valid_tuple + ((barrier,) if barrier else ()))
@@ -166,7 +166,7 @@ class Linearizer(Kernel):
             out = UOp(UOps.GEP, localtype, (self.load_cache[key],), idx_small.max)
             for ix in range(idx_small.max, idx_small.min, -1):
               rvv = UOp(UOps.GEP, localtype, (self.load_cache[key],), ix-1)
-              sel = UOp.alu(BinaryOps.CMPLT, res, UOp.const(dtypes.int, ix))
+              sel = UOp.alu(BinaryOps.CMPLT, res, UOp.const(_idx_dt, ix))
               out = UOp.alu(TernaryOps.WHERE, sel, rvv, out)
             self.load_cache[key] = out
         else:
@@ -206,7 +206,7 @@ class Linearizer(Kernel):
       idx, valid = self.sts[i].expr_idxs(_idx)
       if isinstance(buf.dtype, ImageDType):
         image_idx, valid = to_image_idx(buf.dtype.shape, idx, valid)
-        rendered_idx = UOp(UOps.CAST, dtypes.int.vec(2), \
+        rendered_idx = UOp(UOps.CAST, _idx_dt.vec(2), \
                       tuple(x.render(render_ops, self.loop_uops) for x in image_idx))
       else:
         rendered_idx = idx.render(render_ops, self.loop_uops)
@@ -218,9 +218,9 @@ class Linearizer(Kernel):
 
   # render loop
   def render_loop(self, xx:List[Variable], depth:int, reduce:bool) -> Tuple[UOp, ...]:
-    new_loops = {x.expr:UOp(UOps.RANGE, dtypes.int32, (
-      UOp.const(dtypes.int, x.min) if isinstance(x.min, int) else cast(Node, x.min).render(render_ops, self.loop_uops),
-      UOp.const(dtypes.int, x.max+1) if isinstance(x.max, int) else cast(Node, x.max+1).render(render_ops, self.loop_uops)), arg=(depth,i,reduce)) for i,x in enumerate(xx) if not isinstance(x, NumNode) and x.expr is not None}  # noqa: E501
+    new_loops = {x.expr:UOp(UOps.RANGE, _idx_dt, (
+      UOp.const(_idx_dt, x.min) if isinstance(x.min, int) else cast(Node, x.min).render(render_ops, self.loop_uops),
+      UOp.const(_idx_dt, x.max+1) if isinstance(x.max, int) else cast(Node, x.max+1).render(render_ops, self.loop_uops)), arg=(depth,i,reduce)) for i,x in enumerate(xx) if not isinstance(x, NumNode) and x.expr is not None}  # noqa: E501
     self.loop_uops.update(new_loops)
     return tuple(new_loops.values())
 
@@ -431,9 +431,9 @@ class Linearizer(Kernel):
 
     # render global and local as specials or a loop
     if self.opts.has_local:
-      self.loop_uops.update({x.expr:UOp(UOps.SPECIAL, dtypes.int32, (), (i, x.expr, x.max+1)) for i,x in enumerate(loop_global_idxs)})
+      self.loop_uops.update({x.expr:UOp(UOps.SPECIAL, _idx_dt, (), (i, x.expr, x.max+1)) for i,x in enumerate(loop_global_idxs)})
       if not self.dont_use_locals:
-        self.loop_uops.update({x.expr:UOp(UOps.SPECIAL, dtypes.int32, (), (i, x.expr, x.max+1)) for i,x in enumerate(loop_local_idxs)})
+        self.loop_uops.update({x.expr:UOp(UOps.SPECIAL, _idx_dt, (), (i, x.expr, x.max+1)) for i,x in enumerate(loop_local_idxs)})
     else:
       self.global_size, self.local_size = None, None
       self.render_loop(loop_global_idxs+loop_local_idxs, 1, False)

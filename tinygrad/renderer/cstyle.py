@@ -123,7 +123,7 @@ class CStyleLanguage(Renderer):
       else:
         assert dtype is not None, f"None dtype for uop {uop}"
         if uop is UOps.RANGE:
-          kk(f"for (int {(expr := ssa('ridx',u))} = {r[src[0]]}; {expr} < {r[src[1]]}; {expr}++) {{")
+          kk(f"for ({self.render_dtype(dtype)} {(expr := ssa('ridx',u))} = {r[src[0]]}; {expr} < {r[src[1]]}; {expr}++) {{")
           depth += 1
         elif uop is UOps.ALU:
           # remove parens if ALU types are the same. TODO: can do more here
@@ -135,7 +135,7 @@ class CStyleLanguage(Renderer):
           if child_count[u] <= 1 and args is not BinaryOps.MAX and not getenv("EXPAND_SSA"): r[u] = val
           else: kk(f"{self.render_dtype(dtype)} {ssa('alu',u)} = {val};")
         elif uop is UOps.SPECIAL:
-          kk(f"int {args[1]} = {self.code_for_workitem[args[1][0]](args[0])}; /* {args[2]} */")
+          kk(f"{self.render_dtype(dtype)} {args[1]} = {self.code_for_workitem[args[1][0]](args[0])}; /* {args[2]} */")
           r[u] = args[1]
         elif uop is UOps.LOAD:
           val = self.render_load(dtype, r[src[0]], src[0].dtype, strip_parens(r[src[1]]), src[0].op is UOps.DEFINE_LOCAL)
